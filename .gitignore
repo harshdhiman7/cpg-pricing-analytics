@@ -7,9 +7,9 @@ __pycache__/
 *.so
 
 # Input
-*.csv
-*.xlsx
-*.xls
+.csv
+.xlsx
+.xls
 
 # Distribution / packaging
 .Python
