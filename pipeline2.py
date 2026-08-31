@@ -12,11 +12,13 @@ Usage:
     (or .xlsx — both are handled)
 
 Outputs (written to ./outputs/):
-    - elasticity_by_category.csv       : price elasticity + promo lift per CATEGORY
-    - elasticity_by_upc.csv            : price elasticity + promo lift per UPC
-    - baseline_vs_incremental.csv      : weekly base/incremental unit decomposition
-    - optimal_price_recommendations.csv: suggested optimal price per UPC
-    - model_diagnostics.txt            : fit stats, VIFs, warnings
+    - elasticity_by_category.csv           : OLS price elasticity + promo lift per CATEGORY
+    - elasticity_by_category_elasticnet.csv: ElasticNet price elasticity + promo lift per CATEGORY
+    - elasticity_by_upc.csv                : OLS price elasticity + promo lift per UPC
+    - elasticity_by_upc_elasticnet.csv    : ElasticNet price elasticity + promo lift per UPC
+    - baseline_vs_incremental.csv          : weekly base/incremental unit decomposition
+    - optimal_price_recommendations.csv    : suggested optimal price per UPC
+    - model_diagnostics.txt                : fit stats, VIFs, warnings
 """
 
 import argparse
@@ -26,6 +28,10 @@ import pandas as pd
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+from sklearn.linear_model import ElasticNet
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.metrics import r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -70,7 +76,7 @@ def load_data(path: str) -> pd.DataFrame:
         print(f"[load_data] Dropped {dropped} rows with missing/invalid price or units.")
 
     print(f'UPC level uniqueness...')
-    print("Number of weeks per upc",df.groupby('UPC').agg({'WEEK_END_DATE':'count'}).head())
+    print("Number of weeks per upc", df.groupby('UPC').agg({'WEEK_END_DATE': 'count'}).head())
     print(f'Number of unique stores are {df["STORE_ID"].nunique()}')
     print(f'Year range for the data is {df["WEEK_END_DATE"].min().year}-{df["WEEK_END_DATE"].max().year}')
     return df.reset_index(drop=True)
@@ -143,23 +149,17 @@ def decompose_baseline_incremental(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 4. ELASTICITY MODEL (log-log, fixed effects via dummies / demeaning)
+# 4. ELASTICITY MODEL (OLS - log-log, fixed effects via dummies / demeaning)
 # ---------------------------------------------------------------------------
 def fit_elasticity_model(df: pd.DataFrame, group_col: str = None):
     """
     Fits: LOG_UNITS ~ LOG_PRICE + FEATURE + DISPLAY + TPR_ONLY + FEATURE_X_DISPLAY
-          + C(STORE_ID) + C(WEEK_END_DATE)
-    If group_col is provided, fits one model per group value (e.g. per CATEGORY).
-    Uses store + week fixed effects to control for store-level demand shifters
-    and seasonality/trend, which reduces (but does not fully eliminate) price
-    endogeneity bias.
-    Returns a dict: group_value -> fitted statsmodels results object
+          + C(STORE_ID) + C(WEEK_OF_YEAR) via OLS.
     """
     formula = (
         "LOG_UNITS ~ LOG_PRICE + FEATURE + DISPLAY + TPR_ONLY + FEATURE_X_DISPLAY "
         "+ C(STORE_ID)"
     )
-    # Week fixed effects via week-of-year to keep dummy count manageable
     df = df.copy()
     df["WEEK_OF_YEAR"] = df["WEEK_END_DATE"].dt.isocalendar().week.astype(int)
     formula = formula + " + C(WEEK_OF_YEAR)"
@@ -170,7 +170,6 @@ def fit_elasticity_model(df: pd.DataFrame, group_col: str = None):
                                                         cov_kwds={"groups": df["STORE_ID"]})
     else:
         for g, grp in df.groupby(group_col):
-            # need variation in price and enough obs
             if grp["LOG_PRICE"].nunique() < 3 or len(grp) < 50:
                 continue
             try:
@@ -201,8 +200,70 @@ def summarize_models(models: dict) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("PRICE_ELASTICITY")
 
 
-def fit_elasticnet_elasticity(df,group_col):
-    
+# ---------------------------------------------------------------------------
+# 4B. ELASTICNET ELASTICITY MODEL
+# ---------------------------------------------------------------------------
+def fit_elasticity_model_elasticnet(df: pd.DataFrame, group_col: str = None, alpha: float = 0.1, l1_ratio: float = 0.01):
+    """
+    Fits ElasticNet regression with store and week fixed effects via OneHotEncoding.
+    """
+    df = df.copy()
+    df["WEEK_OF_YEAR"] = df["WEEK_END_DATE"].dt.isocalendar().week.astype(int)
+
+    num_cols = ["LOG_PRICE", "FEATURE", "DISPLAY", "TPR_ONLY", "FEATURE_X_DISPLAY"]
+    cat_cols = ["STORE_ID", "WEEK_OF_YEAR"]
+
+    def _fit_single_group(grp):
+        ohe = OneHotEncoder(drop="first", sparse_output=False)
+        cat_encoded = ohe.fit_transform(grp[cat_cols])
+        X_num = grp[num_cols].values
+        X = np.hstack([X_num, cat_encoded])
+        y = grp["LOG_UNITS"].values
+
+        model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=5000, random_state=42)
+        model.fit(X, y)
+
+        coef_dict = dict(zip(num_cols, model.coef_[:len(num_cols)]))
+        y_pred = model.predict(X)
+        r2 = r2_score(y, y_pred)
+        
+        return {
+            "model": model,
+            "coefs": coef_dict,
+            "r2": r2,
+            "nobs": len(grp)
+        }
+
+    models = {}
+    if group_col is None:
+        models["ALL"] = _fit_single_group(df)
+    else:
+        for g, grp in df.groupby(group_col):
+            if grp["LOG_PRICE"].nunique() < 3 or len(grp) < 50:
+                continue
+            try:
+                models[g] = _fit_single_group(grp)
+            except Exception as e:
+                print(f"[fit_elasticity_model_elasticnet] Skipped group {g}: {e}")
+    return models
+
+
+def summarize_elasticnet_models(models: dict) -> pd.DataFrame:
+    rows = []
+    for g, res in models.items():
+        coefs = res["coefs"]
+        rows.append({
+            "GROUP": g,
+            "PRICE_ELASTICITY": coefs.get("LOG_PRICE", np.nan),
+            "FEATURE_LIFT_PCT": (np.exp(coefs.get("FEATURE", 0)) - 1) * 100,
+            "DISPLAY_LIFT_PCT": (np.exp(coefs.get("DISPLAY", 0)) - 1) * 100,
+            "TPR_ONLY_LIFT_PCT": (np.exp(coefs.get("TPR_ONLY", 0)) - 1) * 100,
+            "FEATURE_X_DISPLAY_LIFT_PCT": (np.exp(coefs.get("FEATURE_X_DISPLAY", 0)) - 1) * 100,
+            "R_SQUARED": res["r2"],
+            "N_OBS": res["nobs"],
+        })
+    return pd.DataFrame(rows).sort_values("PRICE_ELASTICITY")
+
 
 # ---------------------------------------------------------------------------
 # 5. VIF CHECK (multicollinearity between promo mechanics)
@@ -280,16 +341,26 @@ def main(input_path: str, output_dir: str = "outputs"):
         "INCREMENTAL_UNITS", "FEATURE", "DISPLAY", "TPR_ONLY"
     ]].to_csv(f"{output_dir}/baseline_vs_incremental.csv", index=False)
 
-    print("Fitting elasticity model by CATEGORY ...")
+    print("Fitting elasticity model by CATEGORY (OLS)...")
     models_by_cat = fit_elasticity_model(df, group_col="CATEGORY")
     summary_cat = summarize_models(models_by_cat)
     summary_cat.to_csv(f"{output_dir}/elasticity_by_category.csv", index=False)
     print(summary_cat)
 
-    print("Fitting elasticity model by UPC ...")
+    print("Fitting elasticity model by CATEGORY (ElasticNet)...")
+    models_by_cat_en = fit_elasticity_model_elasticnet(df, group_col="CATEGORY")
+    summary_cat_en = summarize_elasticnet_models(models_by_cat_en)
+    summary_cat_en.to_csv(f"{output_dir}/elasticity_by_category_elasticnet.csv", index=False)
+
+    print("Fitting elasticity model by UPC (OLS)...")
     models_by_upc = fit_elasticity_model(df, group_col="UPC")
     summary_upc = summarize_models(models_by_upc)
     summary_upc.to_csv(f"{output_dir}/elasticity_by_upc.csv", index=False)
+
+    print("Fitting elasticity model by UPC (ElasticNet)...")
+    models_by_upc_en = fit_elasticity_model_elasticnet(df, group_col="UPC")
+    summary_upc_en = summarize_elasticnet_models(models_by_upc_en)
+    summary_upc_en.to_csv(f"{output_dir}/elasticity_by_upc_elasticnet.csv", index=False)
 
     print("Checking multicollinearity (VIF) ...")
     vif = check_vif(df)
@@ -302,8 +373,10 @@ def main(input_path: str, output_dir: str = "outputs"):
         f.write("PRICE/PROMO ELASTICITY MODEL DIAGNOSTICS\n")
         f.write("=" * 50 + "\n\n")
         f.write(f"Total rows modeled: {len(df):,}\n")
-        f.write(f"Categories modeled: {len(models_by_cat)}\n")
-        f.write(f"UPCs modeled: {len(models_by_upc)}\n\n")
+        f.write(f"Categories modeled (OLS): {len(models_by_cat)}\n")
+        f.write(f"Categories modeled (ElasticNet): {len(models_by_cat_en)}\n")
+        f.write(f"UPCs modeled (OLS): {len(models_by_upc)}\n")
+        f.write(f"UPCs modeled (ElasticNet): {len(models_by_upc_en)}\n\n")
         f.write("VIF (multicollinearity check, >5-10 = concerning):\n")
         f.write(vif.to_string(index=False))
         f.write("\n\nNOTE: Store + week-of-year fixed effects are included to control\n")
