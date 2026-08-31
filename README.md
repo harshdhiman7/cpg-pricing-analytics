@@ -2,6 +2,33 @@
 
 A comprehensive Python analytics pipeline for CPG (Consumer Packaged Goods) retail data. The pipeline computes price elasticity, promotional lift, baseline vs. incremental unit decomposition, regularized ElasticNet/Ridge estimates, and optimal price recommendations.
 
+# Data
+
+## (Nearly) Real-world data
+Here at dunnhumby, we understand the importance of great data and the analysts who make sense of it. Uncovering patterns, predicting trends, validating theories — insight gained through analysing customer data is the foundation of our business and key to the success of every one of our clients.
+
+But more than that, we just really love data. We love connecting the dots. We love the human stories data can help you tell. And we love the people who love data as much as we do. That’s why we created Source Files, a platform for sharing datasets inspired on the real-world, where fellow data geeks – from professors to students to data scientists – can easily access rich data sources. Whether you’re teaching a course, completing a class project, testing an algorithm, or running a hack-a-thon, Source Files is the place to go to put your theory into practice.
+
+## Breakfast at the Frat
+What’s inside?
+A representation of sales and promotion information on five products from three brands within four categories (mouthwash, pretzels, frozen pizza, and boxed cereal) over 156 weeks.
+
+Unit sales, households, visits, and spend data by product, store, and week
+
+Base Price and Shelf Price, to determine a product’s discount, if any
+
+Promotional support details (e.g. sale tag, in-store display), if applicable
+
+## What’s it for?
+This dataset is designed to facilitate time series analyses, including:
+
+Price sensitivity analysis
+
+Promotional effectiveness analysis
+
+Comparing/contrasting results across products, categories or store geographies
+
+
 ## Features & Highlights
 
 * **Data Ingestion & Validation:** Handles CSV and Excel formats, parses dates, validates numeric ranges, and filters invalid unit/price entries.
