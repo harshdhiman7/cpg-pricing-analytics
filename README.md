@@ -2,7 +2,7 @@
 
 A comprehensive Python analytics pipeline for CPG (Consumer Packaged Goods) retail data. The pipeline computes price elasticity, promotional lift, baseline vs. incremental unit decomposition, regularized ElasticNet/Ridge estimates, and optimal price recommendations.
 
-# Data
+# Data (sourced from Dunnhumby public repo https://www.dunnhumby.com/source-files/)
 
 ## (Nearly) Real-world data
 Here at dunnhumby, we understand the importance of great data and the analysts who make sense of it. Uncovering patterns, predicting trends, validating theories — insight gained through analysing customer data is the foundation of our business and key to the success of every one of our clients.
