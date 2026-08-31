@@ -1,1 +1,1 @@
-# price_elasticity_dunnhumby_data
+# Price elasticity engine
