@@ -201,9 +201,6 @@ def summarize_models(models: dict) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("PRICE_ELASTICITY")
 
 
-def fit_elasticnet_elasticity(df,group_col):
-    
-
 # ---------------------------------------------------------------------------
 # 5. VIF CHECK (multicollinearity between promo mechanics)
 # ---------------------------------------------------------------------------
