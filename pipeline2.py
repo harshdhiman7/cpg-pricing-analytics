@@ -30,7 +30,7 @@ import statsmodels.formula.api as smf
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 from sklearn.linear_model import ElasticNet
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.metrics import r2_score
 
 warnings.filterwarnings("ignore")
@@ -201,11 +201,13 @@ def summarize_models(models: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 4B. ELASTICNET ELASTICITY MODEL
+# 4B. ELASTICNET ELASTICITY MODEL  (now with proper StandardScaler)
 # ---------------------------------------------------------------------------
-def fit_elasticity_model_elasticnet(df: pd.DataFrame, group_col: str = None, alpha: float = 0.1, l1_ratio: float = 0.01):
+def fit_elasticity_model_elasticnet(df: pd.DataFrame, group_col: str = None, 
+                                    alpha: float = 0.1, l1_ratio: float = 0.01):
     """
     Fits ElasticNet regression with store and week fixed effects via OneHotEncoding.
+    Numeric features are standardized; coefficients are transformed back to original scale.
     """
     df = df.copy()
     df["WEEK_OF_YEAR"] = df["WEEK_END_DATE"].dt.isocalendar().week.astype(int)
@@ -214,22 +216,34 @@ def fit_elasticity_model_elasticnet(df: pd.DataFrame, group_col: str = None, alp
     cat_cols = ["STORE_ID", "WEEK_OF_YEAR"]
 
     def _fit_single_group(grp):
-        ohe = OneHotEncoder(drop="first", sparse_output=False)
+        # One-hot encode fixed effects
+        ohe = OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore")
         cat_encoded = ohe.fit_transform(grp[cat_cols])
-        X_num = grp[num_cols].values
-        X = np.hstack([X_num, cat_encoded])
+
+        # Scale numeric features
+        scaler = StandardScaler()
+        X_num_scaled = scaler.fit_transform(grp[num_cols])
+
+        # Combine scaled numerics + unscaled fixed effects
+        X = np.hstack([X_num_scaled, cat_encoded])
         y = grp["LOG_UNITS"].values
 
         model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=5000, random_state=42)
         model.fit(X, y)
 
-        coef_dict = dict(zip(num_cols, model.coef_[:len(num_cols)]))
+        # Unscale only the numeric coefficients so they remain interpretable
+        coef_scaled = model.coef_[:len(num_cols)]
+        coef_unscaled = coef_scaled / scaler.scale_
+
+        coef_dict = dict(zip(num_cols, coef_unscaled))
+
         y_pred = model.predict(X)
         r2 = r2_score(y, y_pred)
-        
+
         return {
             "model": model,
-            "coefs": coef_dict,
+            "scaler": scaler,
+            "coefs": coef_dict,        # already on original scale
             "r2": r2,
             "nobs": len(grp)
         }
