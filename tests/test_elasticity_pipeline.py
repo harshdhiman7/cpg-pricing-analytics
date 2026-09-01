@@ -8,9 +8,11 @@ from elasticity_pipeline import (
     engineer_features,
     decompose_baseline_incremental,
     fit_elasticity_model,
+    fit_elasticity_model_elasticnet,
+    summarize_models,
+    summarize_elasticnet_models,
     check_vif,
     recommend_optimal_price,
-    summarize_models,
 )
 
 
@@ -76,12 +78,18 @@ def test_load_and_engineer_features(tmp_path):
 
     eng = engineer_features(loaded)
     # important engineered columns exist
-    for col in ["DISCOUNT_DEPTH", "LOG_PRICE", "LOG_BASE_PRICE", "LOG_UNITS", "FEATURE_X_DISPLAY", "ANY_PROMO", "REL_PRICE", "UNITS_PER_HH"]:
+    for col in [
+        "DISCOUNT_DEPTH", "LOG_PRICE", "LOG_BASE_PRICE", "LOG_UNITS",
+        "FEATURE_X_DISPLAY", "ANY_PROMO", "REL_PRICE", "UNITS_PER_HH"
+    ]:
         assert col in eng.columns
 
     # REL_PRICE should be PRICE / mean(price) per category-week
     sample_row = eng.iloc[0]
-    cat_week_mean = eng[(eng["CATEGORY"] == sample_row["CATEGORY"]) & (eng["WEEK_END_DATE"] == sample_row["WEEK_END_DATE"])]["PRICE"].mean()
+    cat_week_mean = eng[
+        (eng["CATEGORY"] == sample_row["CATEGORY"]) &
+        (eng["WEEK_END_DATE"] == sample_row["WEEK_END_DATE"])
+    ]["PRICE"].mean()
     assert np.isclose(sample_row["REL_PRICE"], sample_row["PRICE"] / cat_week_mean)
 
 
@@ -121,6 +129,29 @@ def test_fit_model_and_recommend(tmp_path):
     # ensure optimal price column exists and some values are finite
     assert "OPTIMAL_PRICE" in opt.columns
     assert opt["OPTIMAL_PRICE"].notna().any()
+
+
+def test_fit_elasticity_model_elasticnet():
+    df = make_sample_df()
+    df = engineer_features(df)
+
+    # Test overall model fitting
+    models = fit_elasticity_model_elasticnet(df, group_col=None, alpha=0.01, l1_ratio=0.01)
+    assert "ALL" in models
+    assert "LOG_PRICE" in models["ALL"]["coefs"]
+    assert "r2" in models["ALL"]
+
+    # Test summary helper
+    summary = summarize_elasticnet_models(models)
+    assert "PRICE_ELASTICITY" in summary.columns
+    assert "FEATURE_LIFT_PCT" in summary.columns
+    assert len(summary) == 1
+
+    # Test group-level fitting (e.g., CATEGORY)
+    cat_models = fit_elasticity_model_elasticnet(df, group_col="CATEGORY", alpha=0.01, l1_ratio=0.01)
+    cat_summary = summarize_elasticnet_models(cat_models)
+    assert len(cat_summary) > 0
+    assert "GROUP" in cat_summary.columns
 
 
 if __name__ == "__main__":

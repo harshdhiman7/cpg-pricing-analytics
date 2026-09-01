@@ -1,7 +1,7 @@
 """
 Price & Promo Elasticity Pipeline for CPG Weekly Store-UPC Data
 ==================================================================
-Input schema (identical column names expected):
+Input schema (case-insensitive column names expected):
 WEEK_END_DATE, STORE_ID, UPC, UNITS, VISITS, HHS, SPEND, PRICE, BASE_PRICE,
 FEATURE, DISPLAY, TPR_ONLY, DESCRIPTION, MANUFACTURER, CATEGORY, SUB_CATEGORY,
 PRODUCT_SIZE, STORE_NAME, ADDRESS_CITY_NAME, ADDRESS_STATE_PROV_CODE, MSA_CODE,
@@ -12,10 +12,10 @@ Usage:
     (or .xlsx — both are handled)
 
 Outputs (written to ./outputs/):
-    - elasticity_by_category.csv       : price elasticity + promo lift per CATEGORY
-    - elasticity_by_upc.csv            : price elasticity + promo lift per UPC
+    - elasticity_by_category.csv       : price elasticity + promo lift per category
+    - elasticity_by_upc.csv            : price elasticity + promo lift per upc
     - baseline_vs_incremental.csv      : weekly base/incremental unit decomposition
-    - optimal_price_recommendations.csv: suggested optimal price per UPC
+    - optimal_price_recommendations.csv: suggested optimal price per upc
     - model_diagnostics.txt            : fit stats, VIFs, warnings
 """
 
@@ -29,18 +29,18 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 warnings.filterwarnings("ignore")
 
-REQUIRED_COLS = [
-    "WEEK_END_DATE", "STORE_ID", "UPC", "UNITS", "VISITS", "HHS", "SPEND",
-    "PRICE", "BASE_PRICE", "FEATURE", "DISPLAY", "TPR_ONLY", "DESCRIPTION",
-    "MANUFACTURER", "CATEGORY", "SUB_CATEGORY", "PRODUCT_SIZE", "STORE_NAME",
-    "ADDRESS_CITY_NAME", "ADDRESS_STATE_PROV_CODE", "MSA_CODE",
-    "SEG_VALUE_NAME", "PARKING_SPACE_QTY", "SALES_AREA_SIZE_NUM",
-    "AVG_WEEKLY_BASKETS",
+REQUIRED_COLS_LOWER = [
+    "week_end_date", "store_id", "upc", "units", "visits", "hhs", "spend",
+    "price", "base_price", "feature", "display", "tpr_only", "description",
+    "manufacturer", "category", "sub_category", "product_size", "store_name",
+    "address_city_name", "address_state_prov_code", "msa_code",
+    "seg_value_name", "parking_space_qty", "sales_area_size_num",
+    "avg_weekly_baskets",
 ]
 
 
 # ---------------------------------------------------------------------------
-# 1. LOAD + VALIDATE
+# 1. LOAD + VALIDATE (Converts all columns to lower-case internally)
 # ---------------------------------------------------------------------------
 def load_data(path: str) -> pd.DataFrame:
     if path.lower().endswith((".xlsx", ".xls")):
@@ -48,31 +48,34 @@ def load_data(path: str) -> pd.DataFrame:
     else:
         df = pd.read_csv(path)
 
-    missing = set(REQUIRED_COLS) - set(df.columns)
+    # Convert columns to lowercase for internal processing
+    df.rename(columns=lambda x: str(x).strip().lower(), inplace=True)
+
+    missing = set(REQUIRED_COLS_LOWER) - set(df.columns)
     if missing:
         raise ValueError(f"Input file is missing required columns: {missing}")
 
-    df["WEEK_END_DATE"] = pd.to_datetime(df["WEEK_END_DATE"])
+    df["week_end_date"] = pd.to_datetime(df["week_end_date"])
 
     numeric_cols = [
-        "UNITS", "VISITS", "HHS", "SPEND", "PRICE", "BASE_PRICE",
-        "FEATURE", "DISPLAY", "TPR_ONLY", "PARKING_SPACE_QTY",
-        "SALES_AREA_SIZE_NUM", "AVG_WEEKLY_BASKETS",
+        "units", "visits", "hhs", "spend", "price", "base_price",
+        "feature", "display", "tpr_only", "parking_space_qty",
+        "sales_area_size_num", "avg_weekly_baskets",
     ]
     for c in numeric_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
     before = len(df)
-    df = df.dropna(subset=["UNITS", "PRICE", "BASE_PRICE"])
-    df = df[(df["UNITS"] >= 0) & (df["PRICE"] > 0) & (df["BASE_PRICE"] > 0)]
+    df = df.dropna(subset=["units", "price", "base_price"])
+    df = df[(df["units"] >= 0) & (df["price"] > 0) & (df["base_price"] > 0)]
     dropped = before - len(df)
     if dropped:
         print(f"[load_data] Dropped {dropped} rows with missing/invalid price or units.")
 
-    print(f'UPC level uniqueness...')
-    print("Number of weeks per upc",df.groupby('UPC').agg({'WEEK_END_DATE':'count'}).head())
-    print(f'Number of unique stores are {df["STORE_ID"].nunique()}')
-    print(f'Year range for the data is {df["WEEK_END_DATE"].min().year}-{df["WEEK_END_DATE"].max().year}')
+    print("UPC level uniqueness...")
+    print("Number of weeks per upc:", df.groupby('upc').agg({'week_end_date': 'count'}).head())
+    print(f'Number of unique stores: {df["store_id"].nunique()}')
+    print(f'Year range for the data: {df["week_end_date"].min().year}-{df["week_end_date"].max().year}')
     return df.reset_index(drop=True)
 
 
@@ -82,27 +85,27 @@ def load_data(path: str) -> pd.DataFrame:
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # Promo flags -> clean binary ints (guard against non 0/1 values)
-    for c in ["FEATURE", "DISPLAY", "TPR_ONLY"]:
+    # Promo flags -> clean binary ints
+    for c in ["feature", "display", "tpr_only"]:
         df[c] = (df[c] > 0).astype(int)
 
-    df["DISCOUNT_DEPTH"] = (df["BASE_PRICE"] - df["PRICE"]) / df["BASE_PRICE"]
-    df["DISCOUNT_DEPTH"] = df["DISCOUNT_DEPTH"].clip(lower=0)  # no negative "discounts"
+    df["discount_depth"] = (df["base_price"] - df["price"]) / df["base_price"]
+    df["discount_depth"] = df["discount_depth"].clip(lower=0)
 
-    df["LOG_PRICE"] = np.log(df["PRICE"])
-    df["LOG_BASE_PRICE"] = np.log(df["BASE_PRICE"])
-    df["LOG_UNITS"] = np.log(df["UNITS"] + 1)  # +1 guard for zero-unit weeks
+    df["log_price"] = np.log(df["price"])
+    df["log_base_price"] = np.log(df["base_price"])
+    df["log_units"] = np.log(df["units"] + 1)
 
-    df["FEATURE_X_DISPLAY"] = df["FEATURE"] * df["DISPLAY"]
+    df["feature_x_display"] = df["feature"] * df["display"]
 
-    df["ANY_PROMO"] = ((df["FEATURE"] + df["DISPLAY"] + df["TPR_ONLY"]) > 0).astype(int)
+    df["any_promo"] = ((df["feature"] + df["display"] + df["tpr_only"]) > 0).astype(int)
 
-    # Relative price vs. category-week average (competitive positioning)
-    cat_week_avg = df.groupby(["CATEGORY", "WEEK_END_DATE"])["PRICE"].transform("mean")
-    df["REL_PRICE"] = df["PRICE"] / cat_week_avg
+    # Relative price vs. category-week average
+    cat_week_avg = df.groupby(["category", "week_end_date"])["price"].transform("mean")
+    df["rel_price"] = df["price"] / cat_week_avg
 
-    # Units per household (traffic-normalized demand) - useful alt DV
-    df["UNITS_PER_HH"] = df["UNITS"] / df["HHS"].replace(0, np.nan)
+    # Units per household
+    df["units_per_hh"] = df["units"] / df["hhs"].replace(0, np.nan)
 
     return df
 
@@ -111,71 +114,54 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 # 3. BASELINE VS INCREMENTAL DECOMPOSITION
 # ---------------------------------------------------------------------------
 def decompose_baseline_incremental(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    For each UPC-STORE series, fit a simple baseline (trend + seasonality)
-    using only NON-PROMOTED weeks, then predict baseline for all weeks and
-    compute incremental = actual - baseline (floored at 0).
-    """
     results = []
-    df = df.sort_values("WEEK_END_DATE")
+    df = df.sort_values("week_end_date")
 
-    for (upc, store), grp in df.groupby(["UPC", "STORE_ID"]):
+    for (upc, store), grp in df.groupby(["upc", "store_id"]):
         grp = grp.copy()
-        grp["WEEK_NUM"] = (grp["WEEK_END_DATE"] - grp["WEEK_END_DATE"].min()).dt.days // 7
+        grp["week_num"] = (grp["week_end_date"] - grp["week_end_date"].min()).dt.days // 7
 
-        non_promo = grp[grp["ANY_PROMO"] == 0]
+        non_promo = grp[grp["any_promo"] == 0]
 
-        if len(non_promo) >= 5:  # need enough points to fit a trend
-            X = sm.add_constant(non_promo["WEEK_NUM"])
-            y = non_promo["UNITS"]
+        if len(non_promo) >= 5:
+            X = sm.add_constant(non_promo["week_num"])
+            y = non_promo["units"]
             model = sm.OLS(y, X).fit()
-            X_all = sm.add_constant(grp["WEEK_NUM"])
-            grp["BASELINE_UNITS"] = model.predict(X_all).clip(lower=0)
+            X_all = sm.add_constant(grp["week_num"])
+            grp["baseline_units"] = model.predict(X_all).clip(lower=0)
         else:
-            # not enough non-promo weeks -> fall back to overall mean
-            grp["BASELINE_UNITS"] = grp["UNITS"].mean()
+            grp["baseline_units"] = grp["units"].mean()
 
-        grp["INCREMENTAL_UNITS"] = (grp["UNITS"] - grp["BASELINE_UNITS"]).clip(lower=0)
+        grp["incremental_units"] = (grp["units"] - grp["baseline_units"]).clip(lower=0)
         results.append(grp)
 
-    out = pd.concat(results, ignore_index=True)
-    return out
+    return pd.concat(results, ignore_index=True)
 
 
 # ---------------------------------------------------------------------------
-# 4. ELASTICITY MODEL (log-log, fixed effects via dummies / demeaning)
+# 4. ELASTICITY MODEL
 # ---------------------------------------------------------------------------
 def fit_elasticity_model(df: pd.DataFrame, group_col: str = None):
-    """
-    Fits: LOG_UNITS ~ LOG_PRICE + FEATURE + DISPLAY + TPR_ONLY + FEATURE_X_DISPLAY
-          + C(STORE_ID) + C(WEEK_END_DATE)
-    If group_col is provided, fits one model per group value (e.g. per CATEGORY).
-    Uses store + week fixed effects to control for store-level demand shifters
-    and seasonality/trend, which reduces (but does not fully eliminate) price
-    endogeneity bias.
-    Returns a dict: group_value -> fitted statsmodels results object
-    """
     formula = (
-        "LOG_UNITS ~ LOG_PRICE + FEATURE + DISPLAY + TPR_ONLY + FEATURE_X_DISPLAY "
-        "+ C(STORE_ID)"
+        "log_units ~ log_price + feature + display + tpr_only + feature_x_display "
+        "+ C(store_id)"
     )
-    # Week fixed effects via week-of-year to keep dummy count manageable
     df = df.copy()
-    df["WEEK_OF_YEAR"] = df["WEEK_END_DATE"].dt.isocalendar().week.astype(int)
-    formula = formula + " + C(WEEK_OF_YEAR)"
+    df["week_of_year"] = df["week_end_date"].dt.isocalendar().week.astype(int)
+    formula = formula + " + C(week_of_year)"
 
     models = {}
     if group_col is None:
-        models["ALL"] = smf.ols(formula, data=df).fit(cov_type="cluster",
-                                                        cov_kwds={"groups": df["STORE_ID"]})
+        models["ALL"] = smf.ols(formula, data=df).fit(
+            cov_type="cluster", cov_kwds={"groups": df["store_id"]}
+        )
     else:
         for g, grp in df.groupby(group_col):
-            # need variation in price and enough obs
-            if grp["LOG_PRICE"].nunique() < 3 or len(grp) < 50:
+            if grp["log_price"].nunique() < 3 or len(grp) < 50:
                 continue
             try:
                 models[g] = smf.ols(formula, data=grp).fit(
-                    cov_type="cluster", cov_kwds={"groups": grp["STORE_ID"]}
+                    cov_type="cluster", cov_kwds={"groups": grp["store_id"]}
                 )
             except Exception as e:
                 print(f"[fit_elasticity_model] Skipped group {g}: {e}")
@@ -188,28 +174,28 @@ def summarize_models(models: dict) -> pd.DataFrame:
         params = res.params
         pvals = res.pvalues
         rows.append({
-            "GROUP": g,
-            "PRICE_ELASTICITY": params.get("LOG_PRICE", np.nan),
-            "PRICE_ELASTICITY_PVAL": pvals.get("LOG_PRICE", np.nan),
-            "FEATURE_LIFT_PCT": (np.exp(params.get("FEATURE", 0)) - 1) * 100,
-            "DISPLAY_LIFT_PCT": (np.exp(params.get("DISPLAY", 0)) - 1) * 100,
-            "TPR_ONLY_LIFT_PCT": (np.exp(params.get("TPR_ONLY", 0)) - 1) * 100,
-            "FEATURE_X_DISPLAY_LIFT_PCT": (np.exp(params.get("FEATURE_X_DISPLAY", 0)) - 1) * 100,
-            "R_SQUARED": res.rsquared,
-            "N_OBS": int(res.nobs),
+            "group": g,
+            "price_elasticity": params.get("log_price", np.nan),
+            "price_elasticity_pval": pvals.get("log_price", np.nan),
+            "feature_lift_pct": (np.exp(params.get("feature", 0)) - 1) * 100,
+            "display_lift_pct": (np.exp(params.get("display", 0)) - 1) * 100,
+            "tpr_only_lift_pct": (np.exp(params.get("tpr_only", 0)) - 1) * 100,
+            "feature_x_display_lift_pct": (np.exp(params.get("feature_x_display", 0)) - 1) * 100,
+            "r_squared": res.rsquared,
+            "n_obs": int(res.nobs),
         })
-    return pd.DataFrame(rows).sort_values("PRICE_ELASTICITY")
+    return pd.DataFrame(rows).sort_values("price_elasticity")
 
 
 # ---------------------------------------------------------------------------
-# 5. VIF CHECK (multicollinearity between promo mechanics)
+# 5. VIF CHECK
 # ---------------------------------------------------------------------------
 def check_vif(df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["LOG_PRICE", "FEATURE", "DISPLAY", "TPR_ONLY", "FEATURE_X_DISPLAY"]
+    cols = ["log_price", "feature", "display", "tpr_only", "feature_x_display"]
     X = sm.add_constant(df[cols].dropna())
     vif = pd.DataFrame({
         "variable": X.columns,
-        "VIF": [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+        "vif": [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
     })
     return vif[vif["variable"] != "const"]
 
@@ -219,41 +205,32 @@ def check_vif(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 def recommend_optimal_price(df: pd.DataFrame, elasticity_by_upc: pd.DataFrame,
                              margin_pct_assumed: float = 0.30) -> pd.DataFrame:
-    """
-    Uses constant-elasticity logic: for a product with elasticity E (E<-1 required
-    for an interior max under constant marginal cost), the profit-maximizing
-    markup satisfies:  optimal_price = cost / (1 + 1/E)
-    Since we don't have COGS in this dataset, we approximate cost as
-    current BASE_PRICE * (1 - margin_pct_assumed), and solve for optimal price.
-    Treat this as directional guidance, not a final pricing decision --
-    real deployment needs actual product cost data.
-    """
     latest_price = (
-        df.sort_values("WEEK_END_DATE")
-        .groupby("UPC")
-        .agg(CURRENT_BASE_PRICE=("BASE_PRICE", "last"),
-             DESCRIPTION=("DESCRIPTION", "last"),
-             CATEGORY=("CATEGORY", "last"))
+        df.sort_values("week_end_date")
+        .groupby("upc")
+        .agg(current_base_price=("base_price", "last"),
+             description=("description", "last"),
+             category=("category", "last"))
         .reset_index()
     )
 
-    merged = latest_price.merge(elasticity_by_upc, left_on="UPC", right_on="GROUP", how="inner")
-    merged["ASSUMED_COST"] = merged["CURRENT_BASE_PRICE"] * (1 - margin_pct_assumed)
+    merged = latest_price.merge(elasticity_by_upc, left_on="upc", right_on="group", how="inner")
+    merged["assumed_cost"] = merged["current_base_price"] * (1 - margin_pct_assumed)
 
     def solve_price(row):
-        e = row["PRICE_ELASTICITY"]
-        if e >= -1:  # inelastic or wrong-signed -> markup formula breaks down
+        e = row["price_elasticity"]
+        if e >= -1:
             return np.nan
-        return row["ASSUMED_COST"] / (1 + 1 / e)
+        return row["assumed_cost"] / (1 + 1 / e)
 
-    merged["OPTIMAL_PRICE"] = merged.apply(solve_price, axis=1)
-    merged["PRICE_CHANGE_PCT"] = (
-        (merged["OPTIMAL_PRICE"] - merged["CURRENT_BASE_PRICE"]) / merged["CURRENT_BASE_PRICE"] * 100
+    merged["optimal_price"] = merged.apply(solve_price, axis=1)
+    merged["price_change_pct"] = (
+        (merged["optimal_price"] - merged["current_base_price"]) / merged["current_base_price"] * 100
     )
     return merged[[
-        "UPC", "DESCRIPTION", "CATEGORY", "PRICE_ELASTICITY",
-        "CURRENT_BASE_PRICE", "ASSUMED_COST", "OPTIMAL_PRICE", "PRICE_CHANGE_PCT"
-    ]].sort_values("PRICE_CHANGE_PCT")
+        "upc", "description", "category", "price_elasticity",
+        "current_base_price", "assumed_cost", "optimal_price", "price_change_pct"
+    ]].sort_values("price_change_pct")
 
 
 # ---------------------------------------------------------------------------
@@ -273,18 +250,18 @@ def main(input_path: str, output_dir: str = "outputs"):
     print("Decomposing baseline vs incremental units ...")
     df_decomp = decompose_baseline_incremental(df)
     df_decomp[[
-        "WEEK_END_DATE", "STORE_ID", "UPC", "UNITS", "BASELINE_UNITS",
-        "INCREMENTAL_UNITS", "FEATURE", "DISPLAY", "TPR_ONLY"
+        "week_end_date", "store_id", "upc", "units", "baseline_units",
+        "incremental_units", "feature", "display", "tpr_only"
     ]].to_csv(f"{output_dir}/baseline_vs_incremental.csv", index=False)
 
-    print("Fitting elasticity model by CATEGORY ...")
-    models_by_cat = fit_elasticity_model(df, group_col="CATEGORY")
+    print("Fitting elasticity model by category ...")
+    models_by_cat = fit_elasticity_model(df, group_col="category")
     summary_cat = summarize_models(models_by_cat)
     summary_cat.to_csv(f"{output_dir}/elasticity_by_category.csv", index=False)
     print(summary_cat)
 
-    print("Fitting elasticity model by UPC ...")
-    models_by_upc = fit_elasticity_model(df, group_col="UPC")
+    print("Fitting elasticity model by upc ...")
+    models_by_upc = fit_elasticity_model(df, group_col="upc")
     summary_upc = summarize_models(models_by_upc)
     summary_upc.to_csv(f"{output_dir}/elasticity_by_upc.csv", index=False)
 
@@ -304,11 +281,7 @@ def main(input_path: str, output_dir: str = "outputs"):
         f.write("VIF (multicollinearity check, >5-10 = concerning):\n")
         f.write(vif.to_string(index=False))
         f.write("\n\nNOTE: Store + week-of-year fixed effects are included to control\n")
-        f.write("for store-level demand shifters and seasonality. Price endogeneity\n")
-        f.write("(prices cut because demand was expected to move) is only partially\n")
-        f.write("addressed by fixed effects -- for a production model, consider an\n")
-        f.write("instrumental-variables approach (e.g. cost shocks, wholesale price\n")
-        f.write("changes) as a price instrument.\n")
+        f.write("for store-level demand shifters and seasonality.\n")
 
     print(f"\nDone. Outputs written to ./{output_dir}/")
 
