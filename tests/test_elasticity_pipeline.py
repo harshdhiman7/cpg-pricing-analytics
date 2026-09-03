@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from elasticity_pipeline import (
+from src.elasticity_pipeline import (
     load_data,
     engineer_features,
     decompose_baseline_incremental,
